@@ -149,7 +149,7 @@ Resultado esperado:
 ```
 
 Resultado primera iteración:
-![Resultado inicial](static/img/flake9-1-it.png)
+![Resultado inicial](static/img/flake8-1-it.png)
 
 ---
 
