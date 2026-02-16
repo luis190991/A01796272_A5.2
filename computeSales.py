@@ -29,7 +29,7 @@ A) Nested sales:
   - product/title/name/id/sku (identifier)
   - quantity/qty/amount/count (numeric)
 
-B) Flat rows (your TC format):
+B) Flat rows (TC format):
 - List[{"SALE_ID": <id>, "Product": <name>, "Quantity": <num>}, ...]
   Rows are grouped by SALE_ID into sales.
 
@@ -115,9 +115,9 @@ def extract_catalogue_products(raw: Any) -> Iterable[Dict[str, Any]]:
 def build_price_map(catalogue_raw: Any) -> Dict[str, float]:
     """
     Build a mapping from product identifier/name/title to price.
-    We try common keys:
-      - product key: "title", "name", "product", "id", "sku"
-      - price key: "price", "cost", "unit_price"
+    Tries:
+      - id keys: title/name/product/id/sku
+      - price keys: price/cost/unit_price
     """
     price_map: Dict[str, float] = {}
 
@@ -139,7 +139,8 @@ def build_price_map(catalogue_raw: Any) -> Dict[str, float]:
                 price_value = prod.get(key)
                 break
 
-        price = coerce_number(price_value, f"price for catalogue item '{product_key}'")
+        context = f"price for catalogue item '{product_key}'"
+        price = coerce_number(price_value, context)
         if price is None:
             continue
         if price < 0:
@@ -155,9 +156,11 @@ def is_flat_sales_rows(raw: Any) -> bool:
     """Detect flat sales rows list with SALE_ID/Product/Quantity."""
     if not isinstance(raw, list) or not raw:
         return False
+
     sample = raw[0]
     if not isinstance(sample, dict):
         return False
+
     required = {"SALE_ID", "Product", "Quantity"}
     return required.issubset(set(sample.keys()))
 
@@ -192,7 +195,12 @@ def convert_flat_rows_to_sales(raw_rows: List[Dict[str, Any]]) -> List[Dict[str,
     for sale_id in order:
         items: List[Dict[str, Any]] = []
         for row in grouped[sale_id]:
-            items.append({"product": row.get("Product"), "quantity": row.get("Quantity")})
+            items.append(
+                {
+                    "product": row.get("Product"),
+                    "quantity": row.get("Quantity"),
+                }
+            )
         sales.append({"items": items, "_sale_id": sale_id})
 
     return sales
@@ -229,16 +237,18 @@ def extract_sale_items(sale: Any) -> Iterable[Dict[str, Any]]:
     """
     if isinstance(sale, list):
         return (x for x in sale if isinstance(x, dict))
+
     if isinstance(sale, dict):
         for key in ("items", "lines"):
             value = sale.get(key)
             if isinstance(value, list):
                 return (x for x in value if isinstance(x, dict))
+
     return []
 
 
 def get_sale_label(sale: Any, sale_index: int) -> str:
-    """Return a user-friendly sale label, honoring converted flat rows sale id."""
+    """Return a user-friendly sale label (includes SALE_ID when available)."""
     if isinstance(sale, dict) and "_sale_id" in sale:
         sale_id = str(sale.get("_sale_id")).strip()
         if sale_id:
@@ -250,9 +260,10 @@ def normalize_sale_lines(sale: Any, sale_index: int) -> List[SaleLine]:
     """
     Normalize sale items into SaleLine(product_key, quantity).
     Invalid lines are reported and skipped.
+
     Quantity rules:
       - qty == 0 -> invalid (skip)
-      - qty < 0  -> allowed (warn)
+      - qty < 0  -> allowed (warn, treated as return/adjustment)
     """
     lines: List[SaleLine] = []
 
@@ -265,7 +276,9 @@ def normalize_sale_lines(sale: Any, sale_index: int) -> List[SaleLine]:
                 break
 
         if product_key is None:
-            eprint(f"[ERROR] Sale #{sale_index} line #{line_index}: missing product key.")
+            eprint(
+                f"[ERROR] Sale #{sale_index} line #{line_index}: missing product key."
+            )
             continue
 
         qty_value = None
@@ -274,7 +287,8 @@ def normalize_sale_lines(sale: Any, sale_index: int) -> List[SaleLine]:
                 qty_value = item.get(key)
                 break
 
-        qty = coerce_number(qty_value, f"quantity for '{product_key}' in sale #{sale_index}")
+        qty_context = f"quantity for '{product_key}' in sale #{sale_index}"
+        qty = coerce_number(qty_value, qty_context)
         if qty is None:
             continue
 
@@ -288,7 +302,8 @@ def normalize_sale_lines(sale: Any, sale_index: int) -> List[SaleLine]:
         if qty < 0:
             eprint(
                 f"[WARNING] Sale #{sale_index} line #{line_index} ('{product_key}'): "
-                f"negative quantity detected ({qty}). Treating as return/adjustment."
+                f"negative quantity detected ({qty}). "
+                "Treating as return/adjustment."
             )
 
         lines.append(SaleLine(product_key=product_key, quantity=qty))
@@ -307,6 +322,7 @@ def compute_totals(
 ) -> Tuple[List[str], float, int, int]:
     """
     Compute per-sale and grand totals.
+
     Returns:
       - rendered output lines (human readable)
       - grand_total
@@ -326,6 +342,10 @@ def compute_totals(
     output.append("=" * 70)
     output.append("")
 
+    header = "{:<35} {:>8} {:>12} {:>12}".format(
+        "Product", "Qty", "Unit", "Line Total"
+    )
+
     for sale_idx, sale in enumerate(sales_list, start=1):
         processed_sales += 1
         sale_label = get_sale_label(sale, sale_idx)
@@ -334,7 +354,7 @@ def compute_totals(
 
         output.append(sale_label)
         output.append("-" * 70)
-        output.append(f"{'Product':35} {'Qty':>8} {'Unit':>12} {'Line Total':>12}")
+        output.append(header)
         output.append("-" * 70)
 
         if not lines:
@@ -355,21 +375,25 @@ def compute_totals(
             line_total = unit_price * line.quantity
             sale_total += line_total
 
-            output.append(
-                f"{line.product_key[:35]:35} "
-                f"{line.quantity:8.2f} "
-                f"{money(unit_price):>12} "
-                f"{money(line_total):>12}"
-            )
+            product_cell = f"{line.product_key[:35]:35}"
+            qty_cell = f"{line.quantity:8.2f}"
+            unit_cell = f"{money(unit_price):>12}"
+            total_cell = f"{money(line_total):>12}"
+            output.append(f"{product_cell} {qty_cell} {unit_cell} {total_cell}")
 
         output.append("-" * 70)
-        output.append(f"{'Sale Total':>57} {money(sale_total):>12}")
+        sale_total_line = "{:>57} {:>12}".format("Sale Total", money(sale_total))
+        output.append(sale_total_line)
         output.append("")
 
         grand_total += sale_total
 
     output.append("=" * 70)
-    output.append(f"{'GRAND TOTAL':>57} {money(grand_total):>12}")
+    grand_total_line = "{:>57} {:>12}".format(
+        "GRAND TOTAL",
+        money(grand_total),
+    )
+    output.append(grand_total_line)
     output.append("")
     output.append(f"Processed sales: {processed_sales}")
     output.append(f"Processed item lines (valid structure): {processed_lines}")
